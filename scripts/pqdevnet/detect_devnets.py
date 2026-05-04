@@ -19,6 +19,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import sys
 from dataclasses import asdict, dataclass
@@ -162,9 +163,16 @@ def fetch_head_slot_history(
     client: PrometheusConnect,
     start_time: datetime,
     end_time: datetime,
-    step: str = "1m",
+    step: Optional[str] = None,
 ) -> pd.DataFrame:
     """Fetch lean_head_slot history for all clients."""
+    if step is None:
+        # Prometheus caps each timeseries at 11k points. Pick a step that stays
+        # under that, with headroom, so longer --days windows still work.
+        duration_seconds = (end_time - start_time).total_seconds()
+        seconds_per_point = max(60, math.ceil(duration_seconds / 10000))
+        step = f"{seconds_per_point}s"
+
     result = client.custom_query_range(
         query="lean_head_slot",
         start_time=start_time,
