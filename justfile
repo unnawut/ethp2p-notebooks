@@ -50,7 +50,7 @@ show-hashes:
 # ============================================
 
 # Detect devnet iterations from Prometheus
-detect-devnets days="7":
+detect-devnets days="14":
     uv run python scripts/pqdevnet/detect_devnets.py --days {{ days }}
 
 # Fetch data for a devnet (e.g., devnet-001) or "all" devnets

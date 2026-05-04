@@ -1073,7 +1073,10 @@ def main() -> None:
 
     # Determine which devnets to fetch
     if args.devnet == "all":
-        devnets_to_fetch = devnets
+        devnets_to_fetch = [d for d in devnets if d.get("active", True)]
+        skipped = len(devnets) - len(devnets_to_fetch)
+        if skipped:
+            print(f"Skipping {skipped} inactive devnet(s) (use --devnet <id> to force re-fetch)")
     else:
         devnets_to_fetch = [d for d in devnets if d["id"] == args.devnet]
         if not devnets_to_fetch:

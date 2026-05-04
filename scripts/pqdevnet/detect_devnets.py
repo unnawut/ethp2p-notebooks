@@ -46,6 +46,7 @@ class DevnetIteration:
     end_slot: int
     clients: list[str]  # List of client/job names seen
     notes: str = ""
+    active: bool = True  # whether fetch should re-query Prometheus for this devnet
 
 
 def devnet_id_from_timestamp(dt: datetime) -> str:
@@ -369,7 +370,8 @@ def detect_devnets(
     reset_threshold: int = 100,
     tolerance_minutes: int = 10,
     min_clients: int = 2,
-) -> list[DevnetIteration]:
+    alive_window_minutes: int = 30,
+) -> tuple[list[DevnetIteration], Optional[datetime], set[str]]:
     """
     Main detection function.
 
@@ -377,13 +379,21 @@ def detect_devnets(
     2. Detect slot resets per client
     3. Cluster resets that happen across multiple clients
     4. Build devnet iteration objects
+
+    Returns (iterations, df_end, alive_clients) where df_end is the latest
+    timestamp seen in head_slot data, and alive_clients is the set of client
+    names with activity in the last alive_window_minutes of that data.
     """
     print(f"Fetching head_slot data from {start_time.date()} to {end_time.date()}...")
     df = fetch_head_slot_history(client, start_time, end_time)
 
     if df.empty:
         print("No data found.")
-        return []
+        return [], None, set()
+
+    df_end = df["timestamp"].max()
+    alive_threshold = df_end - timedelta(minutes=alive_window_minutes)
+    alive_clients = set(df[df["timestamp"] >= alive_threshold]["client"].unique())
 
     clients = df["client"].unique()
     print(f"Found {len(df)} data points across {len(clients)} clients: {', '.join(clients)}")
@@ -419,12 +429,12 @@ def detect_devnets(
                 clients=list(df["client"].unique()),
                 notes="Single iteration (no multi-client resets detected)",
             )
-        ]
+        ], df_end, alive_clients
 
     print("Building devnet iterations...")
     iterations = build_devnet_iterations(df, clusters)
 
-    return iterations
+    return iterations, df_end, alive_clients
 
 
 def fetch_container_clients(
@@ -502,7 +512,12 @@ def augment_clients_from_containers(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Detect devnet iterations")
-    parser.add_argument("--days", type=int, default=7, help="Days to look back")
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=14,
+        help="Days to look back in Prometheus; also the active-vs-inactive cutoff in devnets.json",
+    )
     parser.add_argument("--start", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", help="End date (YYYY-MM-DD)")
     parser.add_argument("--output", default="notebooks/data/devnets.json")
@@ -557,7 +572,7 @@ def main() -> None:
     client = get_prometheus_client(args.prometheus_url)
     print(f"Prometheus URL: {client.url}")
 
-    iterations = detect_devnets(
+    iterations, df_end, alive_clients = detect_devnets(
         client,
         start_time,
         end_time,
@@ -601,6 +616,44 @@ def main() -> None:
                 print(f"Merged with {len(existing)} existing devnet(s)")
     else:
         print("Merge disabled (--no-merge), overwriting devnets.json")
+
+    # Bump end_time forward for long-running devnets whose start reset is now
+    # outside the detection window but whose clients are still reporting data.
+    # A later iteration's existence implies the older one ended, so skip those.
+    if df_end is not None and alive_clients:
+        bumped = 0
+        for d in iterations:
+            superseded = any(
+                other.start_time > d.end_time for other in iterations if other.id != d.id
+            )
+            if superseded:
+                continue
+            if not any(c in alive_clients for c in d.clients):
+                continue
+            new_end = df_end.isoformat()
+            if new_end <= d.end_time:
+                continue
+            d.end_time = new_end
+            d.duration_hours = round(
+                (df_end - datetime.fromisoformat(d.start_time)).total_seconds() / 3600,
+                2,
+            )
+            bumped += 1
+        if bumped:
+            print(f"Bumped end_time for {bumped} still-active devnet(s)")
+
+    # Mark devnets whose end_time is older than the cutoff as inactive so
+    # `fetch-devnet all` skips them. Recently-active devnets stay active.
+    cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+    inactive = 0
+    for d in iterations:
+        is_active = datetime.fromisoformat(d.end_time) >= cutoff
+        if d.active != is_active:
+            d.active = is_active
+        if not is_active:
+            inactive += 1
+    if inactive:
+        print(f"Marked {inactive} devnet(s) inactive (end_time older than {args.days} days)")
 
     # Print summary
     print(f"\n{'=' * 60}")
