@@ -344,10 +344,16 @@ def main() -> None:
         sys.exit(1)
 
     available_devnet_ids = [d["id"] for d in available_devnets]
+    active_devnet_ids = [d["id"] for d in available_devnets if d.get("active", True)]
+    inactive_count = len(available_devnet_ids) - len(active_devnet_ids)
 
-    # Determine devnets to render
+    # Determine devnets to render. For "all", only render active devnets to keep
+    # the deploy bundle under GitHub Pages' 1 GB cap. Targeting a specific id
+    # still works for inactive ones (manual force re-render).
     if args.devnet == "all":
-        devnets_to_render = available_devnet_ids
+        devnets_to_render = active_devnet_ids
+        if inactive_count:
+            print(f"Rendering active devnets only ({len(active_devnet_ids)} active, {inactive_count} inactive will be pruned)")
     else:
         if args.devnet not in available_devnet_ids:
             print(f"Devnet '{args.devnet}' not found.")
@@ -383,7 +389,9 @@ def main() -> None:
             print(f"Notebook '{args.notebook}' not found in config")
             sys.exit(1)
 
-    latest_devnet = available_devnet_ids[-1] if available_devnet_ids else ""
+    latest_devnet = active_devnet_ids[-1] if active_devnet_ids else (
+        available_devnet_ids[-1] if available_devnet_ids else ""
+    )
 
     print(f"Rendering {len(notebooks)} notebook(s) for {len(devnets_with_data)} devnet(s)")
     print(f"Latest devnet: {latest_devnet}")
@@ -455,8 +463,13 @@ def main() -> None:
                     print(f"    {notebook_id}: FAILED")
                     failed.append((devnet_id, notebook_id, result["result"]))
 
-    # Prune manifest entries for devnets no longer in devnets.json
-    valid_ids = set(available_devnet_ids)
+    # Prune manifest entries for devnets no longer in devnets.json. In "all"
+    # mode, also prune inactive ones so their HTML doesn't bloat the deploy
+    # bundle; in single-devnet mode, leave other inactive entries alone.
+    if args.devnet == "all":
+        valid_ids = set(active_devnet_ids)
+    else:
+        valid_ids = set(available_devnet_ids)
     pruned = prune_manifest(manifest, valid_ids, args.output_dir)
 
     # Update latest devnet
